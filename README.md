@@ -14,16 +14,17 @@
 
 Python's standard reference counting + cyclic GC is robust but costly. `pyzgc` rethinks memory management for high-performance, multi-threaded applications.
 
-### 📊 Performance Scenario (Python 3.13)
+### 📊 Performance Benchmark (External Report)
 
-| Scenario | CPython 3.13 | CPython (No-GIL) | ⚡ pyzgc |
+| Metric | CPython 3.9 (Baseline) | CPython 3.14 (Standard) | ⚡ pyzgc (on 3.9) |
 | :--- | :--- | :--- | :--- |
-| **Object Allocation (10M)** | 1.62s | 1.4s (est) | **0.32s** 🚀 |
-| **Max GC Pause (10GB Heap)** | 450ms | 320ms | **< 2ms** ⚡ |
-| **Memory RSS (After Cleanup)** | 1.2GB | 1.1GB | **0.35GB** 📉 |
-| **Thread Scaling (32 Cores)** | 1.2x | 18x | **29x** � |
+| **Object Allocation (10M)** | 3.45s | 0.85s | **0.41s** (pyzgc.Object) 🚀 |
+| **Memory Overhead (10M)** | ~1935 MB | ~1150 MB | **~405 MB** 📉 |
+| **JSON Parsing (100k items)** | 0.08s | **0.05s** | 0.09s |
+| **Graph Traversal (100k nodes)**| 0.015s | **0.010s** | 0.026s (pyzgc.Object) |
+| **Web Request Sim (50k)** | 0.019s | **0.008s** | 0.021s |
 
-> *Note: Allocation times verified locally on macOS M1. No-GIL and Scaling figures are projected targets based on architecture.*
+> **Analysis**: `pyzgc` dominates in allocation speed and memory efficiency (4.7x less memory than 3.9). However, read-heavy operations like Graph Traversal show a ~1.7x slowdown compared to 3.9 due to the **Load Barrier** overhead (checking pointer colors on every access). This is a known trade-off for concurrent compaction.
 
 ### 🌟 Key Features
 -   **Lock-Free Allocation (TLABs)**: Each thread allocates from its own buffer. Zero contention. **Perfect for No-GIL Python.**
