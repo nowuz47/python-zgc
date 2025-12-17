@@ -75,45 +75,7 @@ pyzgc.minor_gc() # Trigger Minor GC (Young Gen only)
 
 ## 🧠 Under the Hood: The ZGC Architecture
 
-```mermaid
-graph TD
-    subgraph "Python Application"
-        App["User Code"]
-    end
-
-    subgraph "pyzgc Runtime"
-        Obj["ZObject Handle"]
-        LB{"Load Barrier"}
-        TLAB["TLAB (Lock-Free)"]
-    end
-
-    subgraph "ZHeap (Memory)"
-        subgraph "Pages"
-            Body["ZBody (Payload)"]
-            NewBody["Relocated Body"]
-        end
-    end
-
-    subgraph "Background GC Thread"
-        Mark["Concurrent Marker"]
-        Reloc["Concurrent Relocator"]
-    end
-
-    %% Interactions
-    App -->|1. Access| Obj
-    Obj -.->|2. Colored Pointer| LB
-    
-    LB -->|Good Color| Body
-    LB -->|Bad Color (Slow Path)| Reloc
-    
-    App -->|3. Allocate| TLAB
-    TLAB -->|Bump Pointer| Body
-    
-    Mark -->|Scan| Body
-    Reloc -->|Evacuate| Body
-    Reloc -->|Copy| NewBody
-    Reloc -.->|Fix Pointer| LB
-```
+![Architecture Diagram](docs/architecture.png)
 
 `pyzgc` implements the state-of-the-art **Colored Pointer** algorithm:
 
