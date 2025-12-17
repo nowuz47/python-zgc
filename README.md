@@ -78,25 +78,25 @@ pyzgc.minor_gc() # Trigger Minor GC (Young Gen only)
 ```mermaid
 graph TD
     subgraph "Python Application"
-        App[User Code]
+        App["User Code"]
     end
 
     subgraph "pyzgc Runtime"
-        Obj[ZObject Handle]
-        LB{Load Barrier}
-        TLAB[TLAB (Lock-Free)]
+        Obj["ZObject Handle"]
+        LB{"Load Barrier"}
+        TLAB["TLAB (Lock-Free)"]
     end
 
     subgraph "ZHeap (Memory)"
         subgraph "Pages"
-            Body[ZBody (Payload)]
-            NewBody[Relocated Body]
+            Body["ZBody (Payload)"]
+            NewBody["Relocated Body"]
         end
     end
 
     subgraph "Background GC Thread"
-        Mark[Concurrent Marker]
-        Reloc[Concurrent Relocator]
+        Mark["Concurrent Marker"]
+        Reloc["Concurrent Relocator"]
     end
 
     %% Interactions
