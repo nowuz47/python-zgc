@@ -2,6 +2,7 @@
 
 [![Build Status](https://img.shields.io/badge/build-passing-brightgreen)]()
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue)]()
+[![PyPI](https://img.shields.io/pypi/v/pyzgc)](https://pypi.org/project/pyzgc/)
 [![Python](https://img.shields.io/badge/python-3.9%2B-blue)]()
 [![Status](https://img.shields.io/badge/status-experimental-orange)]()
 
@@ -45,6 +46,11 @@ The Global Interpreter Lock (GIL) is going away. Is your memory manager ready?
 ## 🛠️ Quick Start
 
 ### Installation
+```bash
+pip install pyzgc
+```
+
+Or build from source:
 ```bash
 python3 setup.py build_ext --inplace
 ```
