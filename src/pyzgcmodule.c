@@ -1,4 +1,5 @@
 #define PY_SSIZE_T_CLEAN
+#include "zbarrier.h"
 #include "zgc.h"
 #include "zheap.h"
 #include "zobject.h"
@@ -69,7 +70,68 @@ static PyObject *pyzgc_get_body_address(PyObject *self, PyObject *args) {
   Py_RETURN_NONE;
 }
 
+// Testing Helpers
+extern bool zheap_is_old(void *obj);
+extern bool zheap_is_young(void *obj);
+
+static PyObject *pyzgc_is_old(PyObject *self, PyObject *obj) {
+  if (Py_TYPE(obj) != &ZObjectType) {
+    Py_RETURN_FALSE;
+  }
+  ZObject *zobj = (ZObject *)obj;
+  // Barrier: Ensure we are looking at the current location
+  zbarrier_fix_pointer(zobj);
+
+  if (zobj->body && zheap_is_old(zobj->body)) {
+    Py_RETURN_TRUE;
+  }
+  Py_RETURN_FALSE;
+}
+
+static PyObject *pyzgc_is_young(PyObject *self, PyObject *obj) {
+  if (Py_TYPE(obj) != &ZObjectType) {
+    Py_RETURN_FALSE;
+  }
+  ZObject *zobj = (ZObject *)obj;
+  // Barrier: Ensure we are looking at the current location
+  zbarrier_fix_pointer(zobj);
+
+  if (zobj->body && zheap_is_young(zobj->body)) {
+    Py_RETURN_TRUE;
+  }
+  Py_RETURN_FALSE;
+}
+
+static PyObject *pyzgc_trigger_minor_gc(PyObject *self, PyObject *args) {
+  zgc_minor_cycle();
+  Py_RETURN_NONE;
+}
+
+static PyObject *pyzgc_trigger_full_gc(PyObject *self, PyObject *args) {
+  zgc_run_cycle();
+  Py_RETURN_NONE;
+}
+
+extern void zbarrier_enable_signal_mode(void);
+extern void zbarrier_disable_signal_mode(void);
+
+static PyObject *pyzgc_enable_signal_barrier(PyObject *self, PyObject *args) {
+  zbarrier_enable_signal_mode();
+  Py_RETURN_NONE;
+}
+
+static PyObject *pyzgc_disable_signal_barrier(PyObject *self, PyObject *args) {
+  zbarrier_disable_signal_mode();
+  Py_RETURN_NONE;
+}
+
 static PyMethodDef PyZGCMethods[] = {
+    {"is_old", pyzgc_is_old, METH_O, "Check if object is in Old Generation"},
+    {"is_young", pyzgc_is_young, METH_O,
+     "Check if object is in Young Generation"},
+    {"trigger_minor_gc", pyzgc_trigger_minor_gc, METH_NOARGS,
+     "Trigger Minor GC"},
+    {"trigger_full_gc", pyzgc_trigger_full_gc, METH_NOARGS, "Trigger Full GC"},
     {"allocate", pyzgc_allocate, METH_VARARGS, "Allocate memory in ZGC heap."},
     {"start_gc", pyzgc_start_gc, METH_NOARGS,
      "Start the background GC thread."},
@@ -83,6 +145,10 @@ static PyMethodDef PyZGCMethods[] = {
     {"gc", pyzgc_gc, METH_NOARGS, "Run a synchronous Full GC cycle."},
     {"minor_gc", pyzgc_minor_gc, METH_NOARGS,
      "Run a synchronous Minor GC cycle."},
+    {"enable_signal_barrier", (PyCFunction)pyzgc_enable_signal_barrier,
+     METH_NOARGS, "Enable signal-based barriers (default)."},
+    {"disable_signal_barrier", (PyCFunction)pyzgc_disable_signal_barrier,
+     METH_NOARGS, "Disable signal-based barriers (revert to software checks)."},
     {NULL, NULL, 0, NULL}};
 
 static struct PyModuleDef pyzgcmodule = {
@@ -92,6 +158,11 @@ PyMODINIT_FUNC PyInit_pyzgc(void) {
   PyObject *m;
 
   zheap_init();
+
+// Enable Signal-Based Barriers by default (Linux only)
+#ifdef __linux__
+  zbarrier_enable_signal_mode();
+#endif
 
   if (PyType_Ready(&ZObjectType) < 0)
     return NULL;
@@ -108,4 +179,23 @@ PyMODINIT_FUNC PyInit_pyzgc(void) {
   }
 
   return m;
+}
+
+// JIT Interface Implementation
+#include "zjit_interface.h"
+
+ZJIT_Context *zjit_get_context(void) {
+  static ZJIT_Context context;
+  static bool initialized = false;
+
+  if (!initialized) {
+    context.good_color_ptr = &zgc_good_color;
+    context.fix_pointer_func = (void (*)(void **))zbarrier_fix_pointer;
+    context.mask_marked0 = ZPOINTER_MARKED0_BIT;
+    context.mask_marked1 = ZPOINTER_MARKED1_BIT;
+    context.mask_remapped = ZPOINTER_REMAPPED_BIT;
+    initialized = true;
+  }
+
+  return &context;
 }

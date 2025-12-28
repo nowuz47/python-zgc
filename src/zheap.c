@@ -230,6 +230,14 @@ void zpage_start_evacuation(ZPage *page) {
   page->forwarding_table.entries = (ZForwardingEntry *)malloc(
       sizeof(ZForwardingEntry) * page->forwarding_table.capacity);
   page->forwarding_table.count = 0;
+
+  // Signal Barrier Support
+  extern bool zbarrier_is_signal_mode(void);
+  if (zbarrier_is_signal_mode()) {
+    if (mprotect((void *)page->start, ZPAGE_SIZE, PROT_NONE) == -1) {
+      perror("mprotect failed");
+    }
+  }
 }
 
 void zpage_add_forwarding(ZPage *page, void *from, void *to) {
@@ -290,8 +298,11 @@ void zremset_add(void *obj) {
     remset.items =
         (void **)realloc(remset.items, sizeof(void *) * remset.capacity);
   }
-  // Check if already exists? (Linear scan is slow, but fine for prototype)
-  // For now, just add duplicates (GC will handle it)
+  // Simple deduplication: Check if last added item is the same
+  if (remset.count > 0 && remset.items[remset.count - 1] == obj) {
+    pthread_mutex_unlock(&remset_lock);
+    return;
+  }
   remset.items[remset.count++] = obj;
   pthread_mutex_unlock(&remset_lock);
 }

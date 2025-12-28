@@ -10,7 +10,10 @@
 #include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/mman.h>
 #include <unistd.h>
+
+extern bool zbarrier_is_signal_mode(void);
 
 static pthread_t gc_thread;
 static atomic_bool gc_running = false;
@@ -19,6 +22,11 @@ static ZMarkStack mark_stack;
 // Testing helpers
 void zgc_add_root(void *obj) {
   // Always allow adding roots, even if GC not running (for manual cycle)
+  static bool mark_stack_initialized = false;
+  if (!mark_stack_initialized) {
+    zmarkstack_init(&mark_stack);
+    mark_stack_initialized = true;
+  }
   ZObject *zobj = (ZObject *)obj;
   if (zobj && zobj->body) {
     zmarkstack_push(&mark_stack, zobj->body);
@@ -43,15 +51,16 @@ static void zgc_mark(void) {
       continue;
 
     ZPage *page = zheap_get_page(body);
-    if (!page)
+    if (!page) {
       continue;
+    }
 
     if (zpage_is_marked(page, body)) {
+      // printf("[DEBUG] zgc_mark: Already marked %p\n", body);
       continue;
     }
 
     zpage_mark_object(page, body);
-    // printf("[ZGC] Marked %p (Gen: %d)\n", body, page->generation);
 
     for (int i = 0; i < ZOBJECT_SLOTS; i++) {
       PyObject *child = body->slots[i];
@@ -85,11 +94,16 @@ static void zgc_relocate(bool minor_gc) {
   ZPage *current_alloc_page = zheap_get_current_page();
 
   while (page) {
-    // Skip the current allocation page
+    // Skip the current allocation page?
+    // NO! We must evacuate it too if it's Young.
+    // But we must ensure we don't allocate into it during relocation.
+    // Promotion goes to Old Gen, so it's fine.
+    /*
     if (page == current_alloc_page) {
       page = page->next;
       continue;
     }
+    */
 
     // Minor GC: Only evacuate Young pages
     if (minor_gc && page->generation != ZGEN_YOUNG) {
@@ -99,6 +113,11 @@ static void zgc_relocate(bool minor_gc) {
 
     // Start evacuation
     zpage_start_evacuation(page);
+
+    // Signal Barrier: Protect the page
+    if (zbarrier_is_signal_mode()) {
+      mprotect((void *)page->start, ZPAGE_SIZE, PROT_NONE);
+    }
 
     // Scan the bitmap to find live objects
     uintptr_t page_start = page->start;
@@ -128,7 +147,6 @@ static void zgc_relocate(bool minor_gc) {
 
         // 3. Add forwarding entry
         zpage_add_forwarding(page, obj, new_addr);
-        // printf("[ZGC] Relocated %p -> %p\n", obj, new_addr);
       }
     }
 
@@ -174,17 +192,15 @@ void zgc_minor_cycle(void) {
   // printf("[ZGC] Minor Cycle Start. Good Color: %s\n",
   //        (zgc_good_color == ZPOINTER_MARKED0_BIT) ? "Marked0" : "Marked1");
 
-  // 0.5 Clear Bitmaps (Only Young pages need clearing? Or all?)
-  // We need to mark Young objects.
-  // If we clear all bitmaps, we lose Old object marks.
-  // But Old objects are not candidates for collection in Minor GC.
-  // So we only care about marking Young objects.
-  // But tracing might go through Old objects.
-  // If Old objects are not marked, we might re-mark them?
-  // For simplicity, let's clear all bitmaps.
+  // 0.5 Clear Bitmaps (Only Young pages)
+  // We only collect Young Gen, so we only need to clear Young page bitmaps.
+  // Old pages retain their mark state (which might be stale, but they are not
+  // collected).
   ZPage *p = zheap_get_head_page();
   while (p) {
-    zpage_clear_bitmap(p);
+    if (p->generation == ZGEN_YOUNG) {
+      zpage_clear_bitmap(p);
+    }
     p = p->next;
   }
 
@@ -197,9 +213,7 @@ void zgc_minor_cycle(void) {
     }
   }
 
-  // Mark (Roots are already added by zgc_add_root or similar mechanism?
-  // In this prototype, roots are added manually via zgc_add_root.
-  // So we assume roots are in mark stack.)
+  // Mark
   zgc_mark();
 
   // 2. Relocate Phase (Minor only)

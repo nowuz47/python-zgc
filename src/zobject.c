@@ -5,6 +5,8 @@
 #include <Python.h>
 #include <structmember.h>
 
+extern bool zbarrier_is_signal_mode(void);
+
 #define ZOBJECT_FREELIST_MAX 1024
 static __thread ZObject *zobject_freelist[ZOBJECT_FREELIST_MAX];
 static __thread int zobject_freelist_size = 0;
@@ -69,16 +71,26 @@ static PyObject *ZObject_new(PyTypeObject *type, PyObject *args,
   return (PyObject *)self;
 }
 
-static PyObject *ZObject_store(ZObject *self, PyObject *args) {
-  int index;
-  PyObject *value;
-
-  if (!PyArg_ParseTuple(args, "iO", &index, &value))
+static PyObject *ZObject_store(ZObject *self, PyObject *const *args,
+                               Py_ssize_t nargs) {
+  if (nargs != 2) {
+    PyErr_SetString(PyExc_TypeError,
+                    "store() takes exactly 2 arguments (index, value)");
     return NULL;
+  }
+
+  int index = (int)PyLong_AsLong(args[0]);
+  if (index == -1 && PyErr_Occurred()) {
+    return NULL;
+  }
+
+  PyObject *value = args[1];
 
   // Barrier: Ensure self->body is up to date (Load Barrier for self)
   if (!Z_HAS_COLOR(self->body, zgc_good_color)) {
-    zbarrier_fix_pointer(self);
+    if (!zbarrier_is_signal_mode()) {
+      zbarrier_fix_pointer(self);
+    }
   }
 
   if (!self->body) {
@@ -87,9 +99,10 @@ static PyObject *ZObject_store(ZObject *self, PyObject *args) {
   }
 
   // Barrier: Ensure self->body is good before writing
-  if (!Z_HAS_COLOR(self->body, zgc_good_color)) {
-    zbarrier_fix_pointer(self);
-  }
+  // OPTIMIZATION: Redundant barrier removed (checked at start of function)
+  // if (!Z_HAS_COLOR(self->body, zgc_good_color)) {
+  //   zbarrier_fix_pointer(self);
+  // }
 
   if (index < 0 || index >= ZOBJECT_SLOTS) {
     PyErr_SetString(PyExc_IndexError, "Slot index out of range");
@@ -97,9 +110,10 @@ static PyObject *ZObject_store(ZObject *self, PyObject *args) {
   }
 
   // Barrier: Ensure self->body is good before writing
-  if (!Z_HAS_COLOR(self->body, zgc_good_color)) {
-    zbarrier_fix_pointer(self);
-  }
+  // OPTIMIZATION: Redundant barrier removed (checked at start of function)
+  // if (!Z_HAS_COLOR(self->body, zgc_good_color)) {
+  //   zbarrier_fix_pointer(self);
+  // }
 
   // Mask pointer before access
   ZBody *body = (ZBody *)Z_ADDRESS(self->body);
@@ -120,22 +134,24 @@ static PyObject *ZObject_store(ZObject *self, PyObject *args) {
   Py_RETURN_NONE;
 }
 
-static PyObject *ZObject_load(ZObject *self, PyObject *args) {
-  int index;
-  if (!PyArg_ParseTuple(args, "i", &index))
+static PyObject *ZObject_load(ZObject *self, PyObject *arg) {
+  int index = (int)PyLong_AsLong(arg);
+  if (index == -1 && PyErr_Occurred()) {
     return NULL;
+  }
 
   if (index < 0 || index >= ZOBJECT_SLOTS) {
     PyErr_SetString(PyExc_IndexError, "Slot index out of range");
     return NULL;
   }
 
-  // Note: We don't just read the slot here.
-  // We must go through the barrier.
-  // But the barrier needs the OBJECT (Handle) to fix it up if needed?
-  // Or does the barrier take the SLOT content?
-  // zbarrier_load(obj) takes the PyObject* (Handle) that was loaded.
-  // So we load the handle from the body.
+  // Barrier: Ensure self->body is up to date
+  // We use the inline check directly for speed
+  if (UNLIKELY(!Z_HAS_COLOR(self->body, zgc_good_color))) {
+    if (!zbarrier_is_signal_mode()) {
+      zbarrier_fix_pointer(self);
+    }
+  }
 
   // Mask pointer before access
   ZBody *body = (ZBody *)Z_ADDRESS(self->body);
@@ -220,9 +236,14 @@ static PyObject *ZObject_load(ZObject *self, PyObject *args) {
   }
 
   // Now barrier on the result
-  PyObject *result = zbarrier_load(obj);
-  Py_INCREF(result);
-  return result;
+  // OPTIMIZATION: We don't need to barrier the result here!
+  // The result is a Handle (PyObject*). It doesn't move.
+  // The only thing that moves is the Body of the object we just read from.
+  // But we already fixed 'self' before reading.
+  // So 'obj' is the correct Handle.
+  // The user will barrier 'obj' when they access it later (if it's a ZObject).
+  Py_INCREF(obj);
+  return obj;
 }
 
 static PyObject *ZObject_repr(ZObject *self) {
@@ -252,11 +273,89 @@ static PyObject *ZObject_repr(ZObject *self) {
                               self, self->body, gen, status);
 }
 
+// Sequence Protocol Implementation
+static PyObject *ZObject_getitem(ZObject *self, Py_ssize_t i) {
+  if (i < 0 || i >= ZOBJECT_SLOTS) {
+    PyErr_SetString(PyExc_IndexError, "Slot index out of range");
+    return NULL;
+  }
+
+  // Barrier: Ensure self->body is up to date
+  if (UNLIKELY(!Z_HAS_COLOR(self->body, zgc_good_color))) {
+    zbarrier_fix_pointer(self);
+  }
+
+  ZBody *body = (ZBody *)Z_ADDRESS(self->body);
+  PyObject *obj = body->slots[i];
+
+  if (obj == NULL) {
+    Py_RETURN_NONE;
+  }
+
+  // Barrier on result
+  // OPTIMIZATION: Redundant barrier removed.
+  Py_INCREF(obj);
+  return obj;
+}
+
+static int ZObject_setitem(ZObject *self, Py_ssize_t i, PyObject *value) {
+  if (i < 0 || i >= ZOBJECT_SLOTS) {
+    PyErr_SetString(PyExc_IndexError, "Slot index out of range");
+    return -1;
+  }
+
+  if (value == NULL) {
+    PyErr_SetString(PyExc_TypeError, "Cannot delete slots");
+    return -1;
+  }
+
+  // Barrier: Ensure self->body is up to date
+  if (UNLIKELY(!Z_HAS_COLOR(self->body, zgc_good_color))) {
+    zbarrier_fix_pointer(self);
+  }
+
+  ZBody *body = (ZBody *)Z_ADDRESS(self->body);
+  PyObject *old = body->slots[i];
+
+  Py_INCREF(value);
+  body->slots[i] = value;
+  Py_XDECREF(old);
+
+  // Write Barrier
+  if (zheap_is_old(self->body) && Py_TYPE(value) == &ZObjectType) {
+    ZObject *zval = (ZObject *)value;
+    if (zval->body && zheap_is_young(zval->body)) {
+      zremset_add(self->body);
+    }
+  }
+
+  return 0;
+}
+
+static PySequenceMethods ZObject_as_sequence = {
+    .sq_length = 0, // Not really a sized sequence in the traditional sense, or
+                    // fixed size?
+    .sq_concat = 0,
+    .sq_repeat = 0,
+    .sq_item = (ssizeargfunc)ZObject_getitem,
+    .sq_ass_item = (ssizeobjargproc)ZObject_setitem,
+};
+
+// Signal Barrier API
+extern void zbarrier_enable_signal_mode(void);
+
+static PyObject *ZObject_enable_signal_barrier(PyObject *self, PyObject *args) {
+  zbarrier_enable_signal_mode();
+  Py_RETURN_NONE;
+}
+
 static PyMethodDef ZObject_methods[] = {
-    {"store", (PyCFunction)ZObject_store, METH_VARARGS,
+    {"store", (PyCFunction)ZObject_store, METH_FASTCALL,
      "Store an object in a slot."},
-    {"load", (PyCFunction)ZObject_load, METH_VARARGS,
+    {"load", (PyCFunction)ZObject_load, METH_O,
      "Load an object from a slot (with barrier)."},
+    {"enable_signal_barrier", (PyCFunction)ZObject_enable_signal_barrier,
+     METH_NOARGS | METH_STATIC, "Enable experimental signal-based barriers"},
     {NULL}};
 
 PyTypeObject ZObjectType = {
@@ -270,5 +369,6 @@ PyTypeObject ZObjectType = {
     .tp_new = ZObject_new,
     .tp_dealloc = (destructor)ZObject_dealloc,
     .tp_repr = (reprfunc)ZObject_repr,
+    .tp_as_sequence = &ZObject_as_sequence,
     .tp_methods = ZObject_methods,
 };

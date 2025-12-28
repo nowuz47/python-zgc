@@ -1,36 +1,27 @@
 #ifndef ZJIT_INTERFACE_H
 #define ZJIT_INTERFACE_H
 
-#include <stdbool.h>
 #include <stdint.h>
 
-// This header defines the contract for JIT compilers (e.g., PyPy, Cinder)
-// to inline the ZGC Load Barrier.
+// Context structure for JITs to inline barriers
+typedef struct {
+  // Pointer to the global zgc_good_color variable
+  // JIT should dereference this to get the current good color mask.
+  uintptr_t *good_color_ptr;
 
-// Global variable holding the current "Good Color" mask.
-// JITs should read this variable directly.
-extern uintptr_t zgc_good_color;
+  // Function pointer to the slow path (zbarrier_fix_pointer)
+  // JIT should call this if the color check fails.
+  // Signature: void zbarrier_fix_pointer(void **ptr_addr);
+  void (*fix_pointer_func)(void **);
 
-// Fast-Path Load Barrier Logic
-//
-// Usage:
-//   void *ptr = ...; // Load pointer from object
-//   if (!ZJIT_CheckBarrier(ptr)) {
-//       ptr = zbarrier_fix_pointer(ptr); // Slow path call
-//   }
-//   // Use ptr...
+  // Constants for inlining (masks)
+  uintptr_t mask_marked0;
+  uintptr_t mask_marked1;
+  uintptr_t mask_remapped;
+} ZJIT_Context;
 
-#define ZPOINTER_MARKED0_BIT (1ULL << 62)
-#define ZPOINTER_MARKED1_BIT (1ULL << 63)
-#define ZPOINTER_COLOR_MASK (ZPOINTER_MARKED0_BIT | ZPOINTER_MARKED1_BIT)
-
-static inline bool ZJIT_CheckBarrier(void *ptr) {
-  // Check if the pointer has the current "Good Color"
-  return ((uintptr_t)ptr & zgc_good_color) != 0;
-}
-
-// Prototype for the slow path (implemented in zbarrier.c)
-// JITs should call this if ZJIT_CheckBarrier returns false.
-void *zbarrier_fix_pointer_jit(void *ptr);
+// Exported function to get the context
+// This should be called via dlsym or equivalent by the JIT.
+ZJIT_Context *zjit_get_context(void);
 
 #endif // ZJIT_INTERFACE_H

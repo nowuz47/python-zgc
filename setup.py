@@ -8,6 +8,7 @@ module = Extension(
         'src/zobject.c',
         'src/zgc.c',
         'src/zbarrier.c',
+        'src/zbarrier_signal.c',
         'src/zmarkstack.c',
     ],
     include_dirs=['src'],

@@ -3,12 +3,13 @@
 #include "zobject.h"
 #include <stdio.h>
 
-void zbarrier_fix_pointer(ZObject *zobj) {
-  if (!zobj || !zobj->body)
-    return;
+// Core logic to resolve a pointer
+void *zbarrier_resolve_pointer(void *ptr) {
+  if (!ptr)
+    return NULL;
 
   // 1. Strip color to get raw address
-  void *raw_body = Z_ADDRESS(zobj->body);
+  void *raw_body = Z_ADDRESS(ptr);
 
   // 2. Check if page is evacuated
   ZPage *page = zheap_get_page(raw_body);
@@ -17,43 +18,22 @@ void zbarrier_fix_pointer(ZObject *zobj) {
     void *new_body = zpage_resolve_forwarding(page, raw_body);
     if (new_body) {
       // Found new address!
-      // Update with new address AND good color
-      zobj->body = (ZBody *)Z_WITH_COLOR(new_body, zgc_good_color);
-      // printf("[ZBarrier] Fixed %p -> %p\n", raw_body, zobj->body);
-      return;
-    } else {
-      // printf("[ZBarrier] Failed to resolve %p (Page Count: %zu)\n", raw_body,
-      //        page->forwarding_table.count);
-    }
-  } else {
-    if (page) {
-      // printf("[ZBarrier] Page %p not evacuating (Gen: %d)\n", page,
-      //        page->generation);
-    } else {
-      // printf("[ZBarrier] Page not found for %p\n", raw_body);
+      return Z_WITH_COLOR(new_body, zgc_good_color);
     }
   }
 
-  // 3. If not evacuated (or not found in forwarding), just update color
-  // This happens if the object is in a page that wasn't evacuated,
-  // but the global color changed (e.g., next marking phase).
-  // We just "heal" the color.
-  zobj->body = (ZBody *)Z_WITH_COLOR(raw_body, zgc_good_color);
+  // 3. If not evacuated (or not found), just update color
+  return Z_WITH_COLOR(raw_body, zgc_good_color);
 }
 
-PyObject *zbarrier_load(PyObject *obj) {
-  if (obj == NULL)
-    return NULL;
+void zbarrier_fix_pointer(ZObject *zobj) {
+  if (!zobj || !zobj->body)
+    return;
 
-  // Check if it's a ZObject
-  if (Py_TYPE(obj) == &ZObjectType) {
-    ZObject *zobj = (ZObject *)obj;
+  zobj->body = (ZBody *)zbarrier_resolve_pointer(zobj->body);
+}
 
-    // Check color
-    if (!Z_HAS_COLOR(zobj->body, zgc_good_color)) {
-      zbarrier_fix_pointer(zobj);
-    }
-  }
-
-  return obj;
+// JIT Interface Implementation
+void *zbarrier_fix_pointer_jit(void *ptr) {
+  return zbarrier_resolve_pointer(ptr);
 }
