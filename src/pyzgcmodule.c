@@ -159,10 +159,10 @@ PyMODINIT_FUNC PyInit_pyzgc(void) {
 
   zheap_init();
 
-// Enable Signal-Based Barriers by default (Linux only)
-#ifdef __linux__
-  zbarrier_enable_signal_mode();
-#endif
+  // Signal-Based Barriers are OPT-IN (Experimental)
+  // #ifdef __linux__
+  //   zbarrier_enable_signal_mode();
+  // #endif
 
   if (PyType_Ready(&ZObjectType) < 0)
     return NULL;

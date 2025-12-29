@@ -39,7 +39,7 @@ jobs:
 
     - name: Run Benchmarks (Sanity Check)
       run: |
-        python benchmark_ext_suite.py
+        python benchmarks/benchmark_ext_suite.py
 
   build-and-test-nogil:
     name: Build & Test (No-GIL)
@@ -68,4 +68,4 @@ jobs:
 
     - name: Run Benchmarks (Sanity Check)
       run: |
-        python benchmark_ext_suite.py
+        python benchmarks/benchmark_ext_suite.py
