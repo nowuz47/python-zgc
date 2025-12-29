@@ -34,19 +34,10 @@ void zheap_inc_cycle_count(void) { zheap_cycle_count++; }
 uint64_t zheap_get_cycle_count(void) { return zheap_cycle_count; }
 
 static ZPage *zpage_create(uint8_t generation) {
-// Try Huge Pages first (Linux specific, usually 2MB)
-#ifdef MAP_HUGETLB
-  void *raw_mem = mmap(NULL, 2 * ZPAGE_SIZE, PROT_READ | PROT_WRITE,
-                       MAP_PRIVATE | MAP_ANONYMOUS | MAP_HUGETLB, -1, 0);
-  if (raw_mem == MAP_FAILED) {
-    // Fallback to standard pages
-    raw_mem = mmap(NULL, 2 * ZPAGE_SIZE, PROT_READ | PROT_WRITE,
-                   MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-  }
-#else
+  // Try Huge Pages first (Linux specific, usually 2MB)
+  // Use standard pages (Disable Huge Pages for stability in CI)
   void *raw_mem = mmap(NULL, 2 * ZPAGE_SIZE, PROT_READ | PROT_WRITE,
                        MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-#endif
 
   if (raw_mem == MAP_FAILED) {
     perror("mmap failed");
