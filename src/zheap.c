@@ -40,7 +40,8 @@ static ZPage *zpage_create(uint8_t generation) {
                        MAP_PRIVATE | MAP_ANONYMOUS | MAP_HUGETLB, -1, 0);
   if (raw_mem == MAP_FAILED) {
     // Fallback to standard pages
-    raw_mem = mmap(NULL, 2 * ZPAGE_SIZE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    raw_mem = mmap(NULL, 2 * ZPAGE_SIZE, PROT_READ | PROT_WRITE,
+                   MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
   }
 #else
   void *raw_mem = mmap(NULL, 2 * ZPAGE_SIZE, PROT_READ | PROT_WRITE,
