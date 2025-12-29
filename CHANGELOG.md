@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.3.0b1] - 2025-12-29
+
+### Added
+- **Automatic Root Scanning**: Implemented stack walking to automatically find and mark `ZObject` roots on the stack, simplifying user API.
+- **Full Generational ZGC**: Implemented Minor GC for Young Generation, Remembered Sets for Old->Young references, and promotion logic.
+- **macOS Support**: Fixed signal barrier issues on macOS by implementing a fallback to software barriers (disabled signal barriers on macOS by default).
+- **Leak Fixes**: Fixed multiple memory leaks including page reclamation, padding leaks, and ZObject cycle leaks.
+- **Stability**: Fixed critical segmentation faults related to TLAB retirement and cycle counting.
+
+### Changed
+- **TLAB Logic**: Added cycle count check to TLAB retirement to prevent access to reclaimed pages.
+- **Project Structure**: Cleaned up benchmarks and tests.
+
 ## [0.2.0] - 2025-12-28
 
 ### Added
