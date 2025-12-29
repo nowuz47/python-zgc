@@ -109,6 +109,12 @@ pyzgc.enable_signal_barrier() # Enable experimental signal-based barriers
 
 **Current Status**: *Beta*. Generational GC is fully implemented and verified. Signal-based barriers are experimental.
 
+## ⚠️ Caveats & Limitations
+
+1.  **macOS Stability**: Signal-Based Barriers are disabled by default on macOS due to potential hangs with `mprotect` in signal handlers. Use the default Software Barriers on macOS for stability.
+2.  **JIT Requirement**: The `zjit_interface.h` is a passive contract. You need a JIT compiler (like PyPy or a custom CPython build) that implements this interface to see the "Zero Overhead" benefits.
+
+
 ---
 
 ## 🤝 Contributing

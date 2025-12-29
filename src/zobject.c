@@ -3,73 +3,94 @@
 #include "zbarrier.h"
 #include "zheap.h"
 #include <Python.h>
+#include <pthread.h>
 #include <structmember.h>
 
 extern bool zbarrier_is_signal_mode(void);
 
-#define ZOBJECT_FREELIST_MAX 1024
-static __thread ZObject *zobject_freelist[ZOBJECT_FREELIST_MAX];
-static __thread int zobject_freelist_size = 0;
+// Global list of all ZObjects (Roots)
+static ZObject *zobject_list_head = NULL;
+static pthread_mutex_t zobject_list_lock = PTHREAD_MUTEX_INITIALIZER;
+
+// Removed Freelist to support GC correctly
+// static __thread ZObject *zobject_freelist[ZOBJECT_FREELIST_MAX];
+// static __thread int zobject_freelist_size = 0;
+
+static int ZObject_traverse(ZObject *self, visitproc visit, void *arg) {
+  // printf("ZObject_traverse %p\n", self);
+  if (self->body) {
+    for (int i = 0; i < ZOBJECT_SLOTS; i++) {
+      Py_VISIT(self->body->slots[i]);
+    }
+  }
+  return 0;
+}
+
+static int ZObject_clear(ZObject *self) {
+  if (self->body) {
+    for (int i = 0; i < ZOBJECT_SLOTS; i++) {
+      Py_CLEAR(self->body->slots[i]);
+    }
+  }
+  return 0;
+}
 
 static void ZObject_dealloc(ZObject *self) {
-  // Clear weak references
+  // fprintf(stderr, "ZObject_dealloc %p\n", self);
+  PyObject_GC_UnTrack(self);
+
+  // Remove from global list
+  pthread_mutex_lock(&zobject_list_lock);
+  if (self->prev)
+    self->prev->next = self->next;
+  if (self->next)
+    self->next->prev = self->prev;
+  if (zobject_list_head == self)
+    zobject_list_head = self->next;
+  pthread_mutex_unlock(&zobject_list_lock);
+
   if (self->weakreflist != NULL) {
     PyObject_ClearWeakRefs((PyObject *)self);
   }
 
-  // No PyObject_GC_UnTrack needed
-  // Free the body (if we had a free list for bodies, we'd use it)
-  // zheap_free(self->body); // Currently no-op or unmap
+  ZObject_clear(self);
 
-  // Push to freelist
-  if (zobject_freelist_size < ZOBJECT_FREELIST_MAX) {
-    zobject_freelist[zobject_freelist_size++] = self;
-  } else {
-    Py_TYPE(self)->tp_free((PyObject *)self);
-  }
+  Py_TYPE(self)->tp_free((PyObject *)self);
 }
 
-// Removed ZObject_traverse and ZObject_clear as they are for CPython GC
-
-static PyObject *ZObject_alloc(PyTypeObject *type, Py_ssize_t nitems) {
-  ZObject *self;
-
-  // Try freelist first
-  if (zobject_freelist_size > 0) {
-    self = zobject_freelist[--zobject_freelist_size];
-    PyObject_Init((PyObject *)self, type);
-  } else {
-    // Allocate memory for the Handle (ZObject)
-    // Use PyObject_New for non-GC object
-    self = PyObject_New(ZObject, type);
-    if (self == NULL) {
-      return PyErr_NoMemory();
-    }
+static PyObject *ZObject_new(PyTypeObject *type, PyObject *args,
+                             PyObject *kwds) {
+  ZObject *self = (ZObject *)type->tp_alloc(type, 0);
+  if (self == NULL) {
+    return NULL;
   }
 
-  self->weakreflist = NULL; // Initialize weakreflist
+  self->weakreflist = NULL;
 
-  // Allocate Body from ZHeap (Inline Fast Path)
-  // mmap memory is zeroed, so no need to memset if new page.
+  // Allocate Body from ZHeap
   self->body = (ZBody *)zheap_alloc_inline(sizeof(ZBody));
   if (self->body == NULL) {
     Py_DECREF(self);
     return PyErr_NoMemory();
   }
 
+  // Add to global list
+  pthread_mutex_lock(&zobject_list_lock);
+  self->next = zobject_list_head;
+  self->prev = NULL;
+  if (zobject_list_head)
+    zobject_list_head->prev = self;
+  zobject_list_head = self;
+  pthread_mutex_unlock(&zobject_list_lock);
+
+  // PyObject_GC_Track(self); // Assertion failed: already tracked?
   return (PyObject *)self;
 }
 
-static PyObject *ZObject_new(PyTypeObject *type, PyObject *args,
-                             PyObject *kwds) {
-  // tp_alloc (ZObject_alloc) already handles ZObject and ZBody allocation.
-  // We just need to return the allocated object.
-  ZObject *self = (ZObject *)type->tp_alloc(type, 0);
-  if (self == NULL) {
-    return NULL;
-  }
-  return (PyObject *)self;
-}
+// Expose list for ZGC
+ZObject *zobject_get_list_head(void) { return zobject_list_head; }
+void zobject_lock_list(void) { pthread_mutex_lock(&zobject_list_lock); }
+void zobject_unlock_list(void) { pthread_mutex_unlock(&zobject_list_lock); }
 
 static PyObject *ZObject_store(ZObject *self, PyObject *const *args,
                                Py_ssize_t nargs) {
@@ -364,10 +385,12 @@ PyTypeObject ZObjectType = {
     .tp_basicsize = sizeof(ZObject),
     .tp_itemsize = 0,
     .tp_weaklistoffset = offsetof(ZObject, weakreflist),
-    .tp_flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_BASETYPE,
-    .tp_alloc = ZObject_alloc,
+    .tp_flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_BASETYPE | Py_TPFLAGS_HAVE_GC,
+    .tp_alloc = PyType_GenericAlloc,
     .tp_new = ZObject_new,
     .tp_dealloc = (destructor)ZObject_dealloc,
+    .tp_traverse = (traverseproc)ZObject_traverse,
+    .tp_clear = (inquiry)ZObject_clear,
     .tp_repr = (reprfunc)ZObject_repr,
     .tp_as_sequence = &ZObject_as_sequence,
     .tp_methods = ZObject_methods,

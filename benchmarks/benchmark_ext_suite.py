@@ -39,7 +39,11 @@ class Benchmark:
     def run(self):
         print(f"--- Running Benchmark: {self.name} ---")
         print(f"Python: {sys.version.split()[0]} ({platform.python_implementation()})")
-        print(f"GIL Enabled: {getattr(sys, '_is_gil_enabled', lambda: True)() if hasattr(sys, '_is_gil_enabled') else True}")
+        # Check GIL status (Python 3.13+)
+        gil_enabled = True
+        if hasattr(sys, "_is_gil_enabled"):
+            gil_enabled = sys._is_gil_enabled()
+        print(f"GIL Enabled: {gil_enabled}")
         print(f"pyzgc Enabled: {HAS_PYZGC}")
         
         self.measure_allocation()

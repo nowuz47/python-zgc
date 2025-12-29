@@ -74,12 +74,20 @@ typedef struct ZPage {
 
   // NUMA Node ID (for NUMA-aware allocation)
   int numa_node;
+
+  // Raw memory pointer for unmap (includes alignment padding)
+  void *raw_mem;
+
+  // Allocation Cycle (Epoch) to prevent evacuating new pages
+  uint64_t allocation_cycle;
 } ZPage;
 
 // Thread-Local Allocation Buffer
 typedef struct {
   uintptr_t top;
   uintptr_t end;
+  uintptr_t expected_color; // To detect color change
+  uint64_t cycle_count;     // To detect cycle change (even if color matches)
 } ZTLAB;
 
 // Exposed TLAB for inline allocation
@@ -90,6 +98,37 @@ void *zheap_alloc(size_t size, uint8_t generation);
 
 // Inline Fast-Path Allocator
 static inline void *zheap_alloc_inline(size_t size) {
+  // Check for Cycle Change (Lazy TLAB Retirement)
+  // We check both color and cycle count.
+  // Color check is fast (bitwise). Cycle count check handles the case where
+  // color flips back. But checking global variable zheap_cycle_count might be
+  // slow (cache line bouncing)? For now, let's just check color here. If color
+  // matches, we assume it's fine? NO! If color flips back (even number of
+  // cycles), we might use a reclaimed page! So we MUST check cycle count. But
+  // zheap_cycle_count is not exposed in header? It is exposed via
+  // zheap_get_cycle_count(), but that's a function call. We should expose the
+  // variable or just rely on zheap_alloc (slow path) to check it? If we don't
+  // check it here, we might allocate from bad TLAB. So we MUST check it here.
+  // Let's expose zheap_cycle_count in zheap.h?
+  // Or just make zheap_alloc_inline call zheap_alloc if we want to be safe for
+  // now. Let's assume zheap_alloc handles it. But zheap_alloc_inline tries to
+  // allocate from TLAB directly. So we need to access zheap_cycle_count.
+
+  // For this fix, let's disable inline allocation if we can't check cycle count
+  // efficiently. Or just expose zheap_cycle_count.
+
+  // Actually, let's just check expected_color here.
+  // If we want to fix the bug, we need to ensure expected_color ALWAYS changes?
+  // No, it flips.
+
+  // Let's modify zheap.c to expose zheap_cycle_count.
+  extern uint64_t zheap_cycle_count;
+  if (zheap_tlab.expected_color != zgc_good_color ||
+      zheap_tlab.cycle_count != zheap_cycle_count) {
+    // Fallback to slow path to retire TLAB and update color/cycle
+    return zheap_alloc(size, ZGEN_YOUNG);
+  }
+
   // Align size
   size = (size + 7) & ~7;
 
@@ -135,5 +174,18 @@ bool zheap_is_young(void *obj);
 void zremset_add(void *obj);
 void *zremset_pop(void); // For processing
 bool zremset_is_empty(void);
+
+// Page Reclamation
+void zheap_free_reclaim_list(void);
+// Iterate pages, evacuate using callback, and move evacuated pages to reclaim
+// list
+void zheap_relocate_pages(bool (*evacuate_func)(ZPage *page, void *arg),
+                          void *arg);
+
+// Cycle Management
+// Cycle Management
+void zheap_inc_cycle_count(void);
+uint64_t zheap_get_cycle_count(void);
+extern uint64_t zheap_cycle_count;
 
 #endif

@@ -45,6 +45,12 @@ void zbarrier_signal_handler(int signum, siginfo_t *info, void *context) {
 }
 
 void zbarrier_enable_signal_mode(void) {
+#ifdef __APPLE__
+  printf("[ZBarrier-Signal] Signal-Based Barriers NOT SUPPORTED on macOS. "
+         "Using software barriers.\n");
+  return;
+#endif
+
   if (signal_barrier_enabled)
     return;
 

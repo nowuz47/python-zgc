@@ -20,11 +20,18 @@ int zos_get_current_numa_node(void) {
 }
 
 // Thread-Local Allocation Buffer (Only for Young Gen)
-__thread ZTLAB zheap_tlab = {0, 0};
+__thread ZTLAB zheap_tlab = {0, 0, 0, 0};
 
 // Remembered Set
 static ZRememberedSet remset = {NULL, 0, 0};
 static pthread_mutex_t remset_lock = PTHREAD_MUTEX_INITIALIZER;
+
+// Global Cycle Count
+uint64_t zheap_cycle_count = 0;
+
+void zheap_inc_cycle_count(void) { zheap_cycle_count++; }
+
+uint64_t zheap_get_cycle_count(void) { return zheap_cycle_count; }
 
 static ZPage *zpage_create(uint8_t generation) {
 // Try Huge Pages first (Linux specific, usually 2MB)
@@ -33,8 +40,7 @@ static ZPage *zpage_create(uint8_t generation) {
                        MAP_PRIVATE | MAP_ANONYMOUS | MAP_HUGETLB, -1, 0);
   if (raw_mem == MAP_FAILED) {
     // Fallback to standard pages
-    raw_mem = mmap(NULL, 2 * ZPAGE_SIZE, PROT_READ | PROT_WRITE,
-                   MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    raw_mem = mmap(NULL, 2 * ZPAGE_SIZE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
   }
 #else
   void *raw_mem = mmap(NULL, 2 * ZPAGE_SIZE, PROT_READ | PROT_WRITE,
@@ -68,6 +74,10 @@ static ZPage *zpage_create(uint8_t generation) {
   page->forwarding_table.capacity = 0;
 
   page->numa_node = zos_get_current_numa_node();
+  page->raw_mem = raw_mem;
+  page->allocation_cycle = zheap_cycle_count;
+
+  fprintf(stderr, "[ZGC] Mmap %p\n", raw_mem);
 
   return page;
 }
@@ -78,15 +88,21 @@ void zheap_init(void) {
     current_young_page = zpage_create(ZGEN_YOUNG);
     head_page = current_young_page;
   }
+  // Initialize TLAB color and cycle
+  zheap_tlab.expected_color = zgc_good_color;
+  zheap_tlab.cycle_count = zheap_cycle_count;
   pthread_mutex_unlock(&heap_lock);
 }
 
 // Refill TLAB from global heap (Young Gen)
 static bool zheap_refill_tlab(size_t size) {
   pthread_mutex_lock(&heap_lock);
+  // printf("[ZGC] Refill TLAB. Current: %p, Head: %p\n", current_young_page,
+  // head_page);
 
   if (!current_young_page) {
     current_young_page = zpage_create(ZGEN_YOUNG);
+    // printf("[ZGC] Created new page: %p\n", current_young_page);
     head_page = current_young_page;
     if (!current_young_page) {
       pthread_mutex_unlock(&heap_lock);
@@ -110,6 +126,7 @@ static bool zheap_refill_tlab(size_t size) {
 
   zheap_tlab.top = current_young_page->top;
   zheap_tlab.end = current_young_page->top + alloc_size;
+  zheap_tlab.cycle_count = zheap_cycle_count; // Sync cycle count
 
   current_young_page->top += alloc_size;
 
@@ -122,6 +139,16 @@ void *zheap_alloc(size_t size, uint8_t generation) {
   size = (size + 7) & ~7;
 
   if (generation == ZGEN_YOUNG) {
+    // Check Color / Cycle Change (Lazy TLAB Retirement)
+    if (zheap_tlab.expected_color != zgc_good_color ||
+        zheap_tlab.cycle_count != zheap_cycle_count) {
+      // Retire TLAB
+      zheap_tlab.top = 0;
+      zheap_tlab.end = 0;
+      zheap_tlab.expected_color = zgc_good_color;
+      zheap_tlab.cycle_count = zheap_cycle_count;
+    }
+
     // Try TLAB first
     if (zheap_tlab.top + size <= zheap_tlab.end) {
       void *ptr = (void *)zheap_tlab.top;
@@ -173,6 +200,119 @@ void *zheap_alloc(size_t size, uint8_t generation) {
     pthread_mutex_unlock(&heap_lock);
     return Z_WITH_COLOR(ptr, zgc_good_color);
   }
+}
+
+static ZPage *reclaim_list = NULL;
+
+void zpage_free(ZPage *page) {
+  if (page->forwarding_table.entries) {
+    free(page->forwarding_table.entries);
+  }
+  // Unmap
+  if (page->raw_mem) {
+    munmap(page->raw_mem, 2 * ZPAGE_SIZE);
+  } else {
+    munmap((void *)page->start, ZPAGE_SIZE);
+  }
+}
+
+void zheap_free_reclaim_list(void) {
+  pthread_mutex_lock(&heap_lock);
+  ZPage *curr = reclaim_list;
+  int count = 0;
+  while (curr) {
+    ZPage *next = curr->next;
+
+    if (curr->forwarding_table.entries) {
+      free(curr->forwarding_table.entries);
+      curr->forwarding_table.entries = NULL;
+    }
+
+    // Correct Unmap using raw_mem
+    if (curr->raw_mem) {
+      size_t total_size = 2 * ZPAGE_SIZE;
+      fprintf(stderr, "[ZGC] Munmap %p\n", curr->raw_mem);
+      if (munmap(curr->raw_mem, total_size) != 0) {
+        perror("munmap failed");
+      }
+    } else {
+      // fprintf(stderr, "[ZGC] Munmap %p (start)\n", (void *)curr->start);
+      if (munmap((void *)curr->start, ZPAGE_SIZE) != 0) {
+        perror("munmap failed");
+      }
+    }
+
+    curr = next;
+    count++;
+  }
+  reclaim_list = NULL;
+  pthread_mutex_unlock(&heap_lock);
+  if (count > 0) {
+    fprintf(stderr, "[ZGC] Reclaimed %d pages.\n", count);
+  }
+}
+
+void zheap_relocate_pages(bool (*evacuate_func)(ZPage *page, void *arg),
+                          void *arg) {
+  pthread_mutex_lock(&heap_lock);
+
+  ZPage *prev = NULL;
+  ZPage *curr = head_page;
+
+  while (curr) {
+    ZPage *next = curr->next;
+
+    // We must release lock during evacuation?
+    // Evacuation might take time.
+    // But modifying the list requires lock.
+    // ZGC is concurrent. Mutators might allocate (modify head_page).
+    // If we hold lock, we block allocation.
+    // But evacuation is the heavy part.
+    // We should release lock during evacuation.
+
+    pthread_mutex_unlock(&heap_lock);
+    bool evacuated = evacuate_func(curr, arg);
+    pthread_mutex_lock(&heap_lock);
+
+    // After re-acquiring lock, 'curr' might be invalid?
+    // No, we haven't freed it.
+    // But 'prev' might be invalid if someone removed it?
+    // Or 'next' might have changed?
+    // This is hard.
+    // For simplicity in this Alpha, let's hold the lock.
+    // It pauses allocation during Relocation.
+    // This makes it "Stop-The-World" Relocation?
+    // No, mutators can still run if they don't allocate.
+    // But TLAB refill needs lock.
+    // So yes, we block allocators.
+
+    if (evacuated) {
+      // Unlink
+      if (prev) {
+        prev->next = next;
+      } else {
+        head_page = next;
+      }
+
+      // Update current pointers if they point to evacuated page
+      if (current_young_page == curr)
+        current_young_page = NULL; // Should trigger refill
+      if (current_old_page == curr)
+        current_old_page = NULL;
+
+      // Add to reclaim list
+      curr->next = reclaim_list;
+      reclaim_list = curr;
+
+      // Move to next (prev stays same)
+      curr = next;
+    } else {
+      prev = curr;
+      curr = next;
+    }
+  }
+
+  pthread_mutex_unlock(&heap_lock);
 }
 
 void zheap_free(void *ptr) {

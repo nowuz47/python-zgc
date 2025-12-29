@@ -16,9 +16,13 @@ typedef struct {
 // ZObject is the Python wrapper (Handle).
 // It lives in the CPython heap (managed by standard malloc/free or pool).
 // It points to the ZBody in the ZHeap.
-typedef struct {
+typedef struct ZObject {
   PyObject_HEAD ZBody *body;
   PyObject *weakreflist; // List of weak references to this object
+
+  // Global list tracking
+  struct ZObject *next;
+  struct ZObject *prev;
 } ZObject;
 
 extern PyTypeObject ZObjectType;
