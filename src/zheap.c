@@ -75,6 +75,17 @@ static ZPage *zpage_create(uint8_t generation) {
 }
 
 void zheap_init(void) {
+  static bool initialized = false;
+  if (!initialized) {
+    // Initialize recursive mutex for heap_lock
+    pthread_mutexattr_t attr;
+    pthread_mutexattr_init(&attr);
+    pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE);
+    pthread_mutex_init(&heap_lock, &attr);
+    pthread_mutexattr_destroy(&attr);
+    initialized = true;
+  }
+
   pthread_mutex_lock(&heap_lock);
   if (!current_young_page) {
     current_young_page = zpage_create(ZGEN_YOUNG);
@@ -86,19 +97,29 @@ void zheap_init(void) {
   pthread_mutex_unlock(&heap_lock);
 }
 
+static ZPage *new_pages_head = NULL;
+static bool relocation_in_progress = false;
+
 // Refill TLAB from global heap (Young Gen)
 static bool zheap_refill_tlab(size_t size) {
   pthread_mutex_lock(&heap_lock);
-  // printf("[ZGC] Refill TLAB. Current: %p, Head: %p\n", current_young_page,
-  // head_page);
 
   if (!current_young_page) {
     current_young_page = zpage_create(ZGEN_YOUNG);
-    // printf("[ZGC] Created new page: %p\n", current_young_page);
-    head_page = current_young_page;
     if (!current_young_page) {
       pthread_mutex_unlock(&heap_lock);
       return false;
+    }
+
+    // Add to list
+    if (relocation_in_progress) {
+      // Defer insertion to avoid messing up iterator
+      current_young_page->next = new_pages_head;
+      new_pages_head = current_young_page;
+    } else {
+      // Prepend to head_page (don't overwrite!)
+      current_young_page->next = head_page;
+      head_page = current_young_page;
     }
   }
 
@@ -111,7 +132,22 @@ static bool zheap_refill_tlab(size_t size) {
       pthread_mutex_unlock(&heap_lock);
       return false;
     }
-    // Append to list
+    // Append to current (or defer?)
+    // If we append to current_young_page, and current_young_page is in the
+    // list, it's fine? But if current_young_page is in new_pages_head list,
+    // it's also fine. The issue is modifying head_page.
+
+    // Actually, if we append to current_young_page->next, we are fine.
+    // current_young_page->next = new_page.
+    // new_page->next = old_next.
+    // This is safe even during iteration?
+    // If iterator is at current_young_page, it will move to new_page next.
+    // That's fine (we want to scan new pages? No, they are new).
+    // But new pages have allocation_cycle == current.
+    // So evacuate_func will skip them.
+
+    // So appending is safe.
+    new_page->next = current_young_page->next;
     current_young_page->next = new_page;
     current_young_page = new_page;
   }
@@ -248,23 +284,17 @@ void zheap_relocate_pages(bool (*evacuate_func)(ZPage *page, void *arg),
                           void *arg) {
   pthread_mutex_lock(&heap_lock);
 
+  relocation_in_progress = true;
+
   ZPage *prev = NULL;
   ZPage *curr = head_page;
 
   while (curr) {
     ZPage *next = curr->next;
 
-    // We must release lock during evacuation?
-    // Evacuation might take time.
-    // But modifying the list requires lock.
-    // ZGC is concurrent. Mutators might allocate (modify head_page).
-    // If we hold lock, we block allocation.
-    // But evacuation is the heavy part.
-    // We should release lock during evacuation.
-
-    pthread_mutex_unlock(&heap_lock);
+    // We hold the lock during evacuation to prevent list corruption.
+    // This pauses allocation, but ensures safety.
     bool evacuated = evacuate_func(curr, arg);
-    pthread_mutex_lock(&heap_lock);
 
     // After re-acquiring lock, 'curr' might be invalid?
     // No, we haven't freed it.
@@ -302,6 +332,25 @@ void zheap_relocate_pages(bool (*evacuate_func)(ZPage *page, void *arg),
       prev = curr;
       curr = next;
     }
+  }
+
+  relocation_in_progress = false;
+
+  // Merge new pages
+  if (new_pages_head) {
+    // Find end of new_pages list?
+    // No, we prepended to new_pages_head.
+    // So new_pages_head -> ... -> last_new -> NULL.
+    // We want to prepend this whole list to head_page?
+    // Yes.
+    // Find last of new_pages
+    ZPage *last = new_pages_head;
+    while (last->next) {
+      last = last->next;
+    }
+    last->next = head_page;
+    head_page = new_pages_head;
+    new_pages_head = NULL;
   }
 
   pthread_mutex_unlock(&heap_lock);

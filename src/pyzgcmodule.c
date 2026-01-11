@@ -23,8 +23,8 @@ static PyObject *pyzgc_start_gc(PyObject *self, PyObject *args) {
 }
 
 static PyObject *pyzgc_stop_gc(PyObject *self, PyObject *args) {
-  zgc_stop_thread();
-  Py_RETURN_NONE;
+  Py_BEGIN_ALLOW_THREADS zgc_stop_thread();
+  Py_END_ALLOW_THREADS Py_RETURN_NONE;
 }
 
 static PyObject *pyzgc_add_root(PyObject *self, PyObject *args) {
